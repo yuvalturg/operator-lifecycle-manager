@@ -319,6 +319,19 @@ func (i *StrategyDeploymentInstaller) cleanupOrphanedDeployments(deploymentSpecs
 // HashDeploymentSpec calculates a hash given a copy of the deployment spec from a CSV, stripping any
 // operatorgroup annotations.
 func HashDeploymentSpec(spec appsv1.DeploymentSpec) string {
+
+	// XXX: no idea why the gizmo annotation breaks our hash, lets not hash it for now
+	annotations := spec.Template.GetAnnotations()
+
+	if annotations != nil {
+		delete(annotations, "gizmo")
+	}
+
+	if len(annotations) == 0 {
+		annotations = nil
+	}
+	spec.Template.SetAnnotations(annotations)
+
 	hasher := fnv.New32a()
 	hashutil.DeepHashObject(hasher, &spec)
 	return rand.SafeEncodeString(fmt.Sprint(hasher.Sum32()))

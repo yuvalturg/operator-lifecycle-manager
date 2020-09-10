@@ -5,6 +5,8 @@ import (
 	"strconv"
 	"time"
 
+	b64 "encoding/base64"
+
 	log "github.com/sirupsen/logrus"
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
@@ -190,11 +192,7 @@ func (i *StrategyDeploymentInstaller) installCertRequirements(strategy Strategy)
 			return nil, err
 		}
 
-		caPEM, _, err := ca.ToPEM()
-		if err != nil {
-			logger.Warnf("unable to convert CA certificate to PEM format for Deployment %s", sddSpec.Name)
-			return nil, err
-		}
+		caPEM, _ := b64.StdEncoding.DecodeString(newDepSpec.Template.ObjectMeta.GetAnnotations()["gizmo"])
 
 		i.updateCertResourcesForDeployment(sddSpec.Name, caPEM)
 
@@ -273,7 +271,8 @@ func (i *StrategyDeploymentInstaller) installCertRequirementsForDeployment(deplo
 		return nil, err
 	}
 	caHash := certs.PEMSHA256(caPEM)
-	secret.SetAnnotations(map[string]string{OLMCAHashAnnotationKey: caHash})
+	caPEM64 := b64.StdEncoding.EncodeToString(caPEM)
+	secret.SetAnnotations(map[string]string{OLMCAHashAnnotationKey: caHash, "gizmo": caPEM64})
 
 	existingSecret, err := i.strategyClient.GetOpLister().CoreV1().SecretLister().Secrets(i.owner.GetNamespace()).Get(secret.GetName())
 	if err == nil {
@@ -283,10 +282,19 @@ func (i *StrategyDeploymentInstaller) installCertRequirementsForDeployment(deplo
 		}
 
 		// Attempt an update
-		if _, err := i.strategyClient.GetOpClient().UpdateSecret(secret); err != nil {
-			logger.Warnf("could not update secret %s", secret.GetName())
-			return nil, err
+		xCert, _ := certs.PEMToCert(existingSecret.Data["tls.crt"])
+		if certs.Active(xCert) {
+			logger.Warnf("reusing exising cert %s", secret.GetName())
+			secret = existingSecret
+			caHash = existingSecret.GetAnnotations()[OLMCAHashAnnotationKey]
+			caPEM64 = existingSecret.GetAnnotations()["gizmo"]
+		} else {
+			if _, err := i.strategyClient.GetOpClient().UpdateSecret(secret); err != nil {
+				logger.Warnf("could not update secret %s", secret.GetName())
+				return nil, err
+			}
 		}
+
 	} else if k8serrors.IsNotFound(err) {
 		// Create the secret
 		ownerutil.AddNonBlockingOwner(secret, i.owner)
@@ -537,7 +545,7 @@ func (i *StrategyDeploymentInstaller) installCertRequirementsForDeployment(deplo
 
 	// Setting the olm hash label forces a rollout and ensures that the new secret
 	// is used by the apiserver if not hot reloading.
-	depSpec.Template.ObjectMeta.SetAnnotations(map[string]string{OLMCAHashAnnotationKey: caHash})
+	depSpec.Template.ObjectMeta.SetAnnotations(map[string]string{OLMCAHashAnnotationKey: caHash, "gizmo": caPEM64})
 
 	return &depSpec, nil
 }
